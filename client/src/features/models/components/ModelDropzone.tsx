@@ -7,7 +7,10 @@ import { useState } from 'react';
 import { useImportModels } from '../hooks/useModelsList';
 import { cn } from '@/shared/ui/cn';
 
-const SUPPORTED = new Set(['.onnx', '.tflite', '.h5', '.keras', '.pt', '.pth']);
+// Espejo de MODEL_EXTENSIONS del backend (mainAPI.py). '.torchscript' es la extension
+// con la que Ultralytics exporta TorchScript: el archivo es identico a un .pt exportado
+// igual, pero sin tenerla en la lista el usuario tenia que renombrarlo a mano.
+const SUPPORTED = new Set(['.onnx', '.tflite', '.h5', '.keras', '.torchscript', '.pt', '.pth']);
 
 function extOf(name: string): string {
   const i = name.lastIndexOf('.');
@@ -25,7 +28,10 @@ export function ModelDropzone() {
     const accepted = files.filter((f) => SUPPORTED.has(extOf(f.name)));
     const rejected = files.length - accepted.length;
     if (accepted.length === 0) {
-      setFeedback({ text: 'Formato no soportado (.onnx/.tflite/.h5/.keras/.pt/.pth)', ok: false });
+      setFeedback({
+        text: 'Formato no soportado (.onnx/.tflite/.h5/.keras/.torchscript/.pt/.pth)',
+        ok: false,
+      });
       return;
     }
 

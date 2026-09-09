@@ -177,7 +177,7 @@ export function RenderSettings() {
 // Boton de una grilla de opciones excluyentes (estilo de marca, modo de etiqueta).
 // Se factorizo al agregar el segundo selector: son la misma pieza y duplicar el bloque
 // de clases garantiza que en el tercero uno de los dos quede desalineado.
-function Opcion({
+export function Opcion({
   label,
   hint,
   activo,
@@ -213,7 +213,7 @@ function Opcion({
 
 // Fila de color compacta: la columna son 230px, asi que el nombre a la izquierda, el
 // hex y la muestra a la derecha. El <input type=color> abre el selector del sistema.
-function Color({
+export function Color({
   label,
   value,
   onChange,

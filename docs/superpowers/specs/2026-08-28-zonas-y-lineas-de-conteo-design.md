@@ -297,3 +297,197 @@ A medir:
 
 Los pasos 1–3 se verifican por HTTP+WS sin tocar el cliente; el 4 por CDP, como el panel
 `Seguimiento`.
+
+---
+
+## 10. Cómo salió (zonas: 2026-09-09)
+
+Se implementaron los pasos **1 a 4** — zonas end-to-end, backend y cliente. La **línea
+de conteo (paso 5) queda para la tanda siguiente**, reusando este mismo canal y este
+mismo editor con dos vértices; el backend ya la rechaza explícitamente (`"las líneas de
+conteo todavía no están implementadas"`) en vez de ignorarla en silencio.
+
+**Lo que el spec acertó y se implementó tal cual:**
+
+- **Los dos cajones.** `SceneGeometry` (`render/geometry.py`) es el cajón de la escena
+  y `sync()` no lo toca; el `reset()` del tracker quedó documentado con dónde va a ir
+  el contador de la línea cuando llegue (en el cajón del *tracker*, no en este).
+- **El canal de control por el WS**, con el discriminador antes de `_decode_frame`.
+- **`stateful=false` no apaga la geometría**: una zona sobre una foto suelta funciona.
+- **Coordenadas normalizadas**, con el guard de aspecto como aserción que loguea y no
+  dibuja, sin interfaz.
+
+**Lo que se corrigió del spec, con motivo:**
+
+1. **El `<svg viewBox="0 0 1 1">` de §6 se probó y se descartó.** La idea era no escribir
+   una sola multiplicación. Funciona para el polígono, pero **todo lo que mide en píxeles
+   de pantalla** —el radio de un vértice, el grosor del trazo, el imán de cierre— pasa a
+   necesitar una contra-escala, porque en ese sistema una unidad es el frame entero. La
+   aritmética que se ahorra en el polígono se paga con intereses justo en los mangos, que
+   son la parte que hay que poder agarrar con el mouse. El SVG trabaja en **píxeles de la
+   caja** y la conversión es una multiplicación por punto, en un solo lugar (`aPx`). El
+   estado sigue siendo normalizado de punta a punta, que es lo que evita el salto al
+   confirmar.
+2. **El agujero de la reconexión (§3) se cerró, y salió gratis.** El spec lo aceptaba: una
+   reconexión por backoff pierde la zona sin que el usuario haya cambiado de fuente. Pero
+   el cliente **tiene que guardar el polígono igual** (lo necesita para dibujar el editor),
+   así que `videoStream.ts` recuerda el último mensaje de geometría y lo re-emite en cada
+   `onopen`, antes del primer frame. No es persistencia: sigue muriendo con la fuente.
+3. **Hizo falta un color propio para la zona** (`zone_color`, ámbar `#FFB020`). El spec no
+   lo preveía. Con el cian de las cajas el polígono se confunde con las detecciones
+   **justo cuando hay muchas**, que es cuando la zona sirve.
+4. **El anclaje es del usuario, no una constante.** El default de supervision
+   (`BOTTOM_CENTER`, "donde el objeto toca el piso") es correcto para una cámara de calle
+   y **no significa nada en vista aérea**, que es de donde viene el primer modelo propio
+   del usuario (`best`, VisDrone). Se expone como `zone_anchor` (`centro` | `inferior`),
+   con `centro` por defecto. Además ver **cómo cambia el conteo al cambiar el anclaje** es
+   exactamente lo que el objetivo educativo quiere hacer visible.
+5. **Los pushes de geometría se coalescen (60 ms).** No estaba previsto y es un problema
+   real: arrastrar un vértice escribe en el store en **cada `pointermove`** (~60/s), y
+   cada mensaje reconstruye el `sv.PolygonZone`, que **rasteriza una máscara**. Sobre un
+   frame grande son megabytes por evento, sesenta veces por segundo, compitiendo con los
+   frames en el mismo canal — y trabajo tirado, porque los estados intermedios se pisan a
+   los 16 ms. Los vértices igual se mueven en vivo (los dibuja el cliente desde el store);
+   lo único que espera es el redibujado del backend, y el último estado siempre llega.
+
+**El ack quedó como lo pedía §5.2**, con el estado efectivo:
+`{"type":"geometry_ack","zones":1,"lines":0,"error":null}`. Ante geometría inválida se
+**conserva la anterior** y el ack dice por qué (`"la zona z2 tiene 2 vértices: van de 3 a
+64"`). El rechazo es del **mensaje entero y no por zona**: aceptar la mitad dejaría al
+backend con un estado que el cliente no cree tener.
+
+### Medido
+
+`best` sobre `autos_desde_arriba.png` (713×403, ~70 detecciones), 40 frames por config,
+recargando el modelo entre configuraciones para resetear el PerfMeter:
+
+| config | `draw_ms` |
+|---|---|
+| sin zona | 1,32 |
+| 1 zona (4 vértices) | 1,38 |
+| 2 zonas | 1,45 |
+| 4 zonas | 1,61 |
+| 1 zona de **16** vértices | 1,37 |
+
+O sea **~0,07 ms por zona** con 70 detecciones, incluyendo el test de pertenencia *y* el
+`PolygonZoneAnnotator`. Coincide con el orden que estimaba el catálogo (0,03 ms sólo el
+test) y responde lo que §7 pedía confirmar: **escala con la cantidad de zonas, no con la
+cantidad de detecciones ni con la de vértices**. Que 16 vértices cuesten lo mismo que 4 es
+la consecuencia de que la máscara se rasteriza **una vez al construir la zona** y el test
+por frame es una consulta a esa tabla.
+
+**Ojo con la columna `inf_ms` de esa corrida**: dio entre 6,9 y 24,3 ms entre
+configuraciones que **no tocan la inferencia**. Es la varianza ya documentada; los buckets
+aislados son medición y el total no.
+
+### Verificado
+
+- **287 tests verdes** (43 nuevos en `test_zonas.py`), `npm run typecheck` y
+  `npm run build` limpios.
+- **End-to-end real por HTTP+WS**: el frame cambia con la zona y vuelve al original al
+  borrarla; dos zonas dan un frame distinto de una; el polígono degenerado devuelve error
+  en el ack **con el stream vivo**; un control desconocido se contesta y no rompe nada; un
+  **JPEG en base64 no se confunde con control** (sigue el camino de frame); el one-shot
+  `?stateful=false` acepta zonas; y **la zona sobrevive a cambiar de modelo sin cerrar el
+  WebSocket**, que es la decisión de fondo de §3.
+- **El guard de aspecto**, con un caso bien elegido: declarar 640×480 (4:3) sobre frames
+  de 713×403 **no dibuja la zona** y loguea los dos tamaños; declarar 1920×1080 **sí la
+  dibuja**, porque 713×403 es 16:9 (1,769 contra 1,778, dentro del 1%). El primer intento
+  de verificación falló por elegir mal el caso, no por el código.
+- **A ojo**, sobre foto aérea real: dos zonas ámbar con sus contadores (22 y 6) sobre las
+  cajas cian, cada contador coincidiendo con lo que se ve adentro del polígono.
+- **Por CDP** (Edge headless, dev server y backend en puertos propios para no pisar el
+  `:8000` del usuario): la sección `Zonas` existe entre `Seguimiento` y `Métricas`; el SVG
+  del editor se monta **exactamente sobre la caja del canvas** ([349,142,713,403] contra un
+  canvas de 713×403) y sólo captura el cursor mientras se edita —con el modo apagado queda
+  un div `pointer-events-none` vacío—; **cuatro clicks reales sobre el feed** producen los
+  cuatro vértices y cerrar sobre el primero crea `z1 · 4 pts`; cambiar el anclaje persiste
+  en localStorage; borrar la zona la saca; y **recargar la página borra el polígono y
+  conserva el color y el anclaje**, que es exactamente la división que el spec pedía.
+
+### Lo que la verificación visual dejó a la vista
+
+Con `label_mode: completa` y ~70 detecciones, **el contador de la zona queda tapado**. Es
+literalmente el riesgo 4 de §8, y confirma que hacer #27 primero fue lo correcto: la
+herramienta que lo resuelve ya existe (`Etiquetas → Ninguna`), y con las etiquetas
+apagadas el polígono y su contador se leen perfectamente. Queda anotado que **el orden de
+capas pone la zona abajo de todo** a propósito —es geometría de la escena, y el resultado
+del modelo es lo que el usuario está mirando—, así que la respuesta a "no veo el contador"
+es apagar las etiquetas, no subir la zona de capa.
+
+---
+
+## 11. El acumulado de zona (2026-09-09, mismo dia)
+
+Pedido del usuario despues de probar las zonas: *"¿qué posibilidad hay de que mantenga la
+cuenta? ¿O eso es mejor hacerlo en las líneas de conteo?"*
+
+**La respuesta es que no compiten.** La linea da algo que la zona no puede dar —**direccion**
+("entraron 47, salieron 31")— y la zona responde algo que la linea no: "cuantos objetos
+distintos usaron *esta region*", sin obligar a acertar donde poner el segmento. Se hizo en la
+zona **primero**, y por el mismo argumento con el que la zona fue antes que la linea: obliga a
+construir la infraestructura del contador —reseteo, filtrado de `-1`, la dependencia con el
+seguimiento— que la linea despues reusa tal cual.
+
+**Se descartaron dos lecturas alternativas de "mantener la cuenta"**, ofrecidas al usuario y no
+elegidas: el **pico de ocupacion simultanea** (no necesita tracking, seria practicamente gratis
+y podria vivir en el cajon de la escena) y la **permanencia por objeto** ("este lleva 8 s
+adentro"). Quedan como opciones baratas si alguna vez hacen falta.
+
+### Donde vive, y por que ahi
+
+El **poligono** sigue en el cajon de la escena; **la cuenta va en el cajon del TRACKER**. No es
+una inconsistencia: son dos hechos distintos. El poligono describe la escena y tiene que
+sobrevivir al cambio de modelo; lo contado ahi adentro pertenece a las identidades de *ese*
+modelo. Es exactamente la regla que §3 anticipaba para el contador de la linea, aplicada antes
+de lo previsto.
+
+### El hallazgo caro, verificado contra la libreria
+
+**Un `ByteTrackTracker` recien construido vuelve a numerar los ids DESDE 0** (medido: dos
+trackers distintos, con objetos en lugares distintos, entregan ambos `tracker_id = 0` a su
+primer track confirmado). Consecuencia: si el conjunto de ids ya vistos sobreviviera a una
+reconstruccion del tracker, **el primer objeto nuevo llegaria con un id que el conjunto ya
+tiene y no se contaria**. Y el sintoma no seria un error: seria un numero corto, sin
+explicacion.
+
+Por eso el acumulado se borra **en todos los lugares donde el tracker se suelta o se
+reconstruye**, no solo en `reset()`: tambien al **mover el umbral de confianza**, que rehace el
+tracker con otros parametros. Es la misma familia de trampa que los `tracker_id` en `-1`, y
+`_olvidar_conteo()` la concentra en un lugar.
+
+### Decisiones de semantica
+
+- **Se guardan los IDS, no un contador.** Un objeto que sale y vuelve a entrar cuenta **una**
+  vez. Contar transiciones seria mas barato y estaria mal: un objeto quieto sobre el borde
+  titila adentro/afuera e inflaria el numero solo — el artefacto que hace desconfiar de un
+  contador.
+- **Mover un vertice NO resetea.** El usuario esta ajustando la region, y perder la cuenta en
+  cada arrastre haria el numero inutil justo mientras se lo acomoda. Para eso esta el boton.
+- **Borrar una zona SI borra su cuenta**, y no es higiene: los ids de zona **se reusan** (el
+  cliente numera `z1, z2, ...` y rellena los huecos), asi que sin podar, una zona nueva
+  heredaria la cuenta de la que se acaba de borrar.
+- **Separador ASCII en el cartel** (`"45 / 101"`). Supervision estampa el texto con
+  `cv2.putText`, que usa fuentes Hershey y **no tiene glifos fuera de ASCII**: un caracter mas
+  lindo saldria como un signo de pregunta.
+- **La dependencia con el seguimiento** se suma a la regla que ya existia: pedir el acumulado
+  **prende el tracking**, apagar el tracking **lo apaga**. Sin identidad, "objetos distintos" no
+  existe.
+
+### Verificado
+
+- **308 tests verdes** (21 nuevos sobre los 43 de zonas), `npm run typecheck` y `npm run build`
+  limpios.
+- **End-to-end real**: 20 frames **identicos** dan `45 / 45` —los mismos autos, no 900—, y la
+  misma escena **en movimiento** llega a `51 / 101`. El reseteo por el WS y el cambio de modelo
+  vuelven el total a arrancar **sin tocar el poligono**; apagar el acumulado devuelve el cartel
+  a `45` a secas.
+- **Por CDP**: el toggle `Acumulado` esta habilitado con video y prende `SEGUIMIENTO · ON` solo,
+  el boton de poner en cero aparece en la fila de la zona solo cuando hay cuenta que resetear, y
+  apagar el seguimiento deja `{zoneTotal:false, tracking:false}` y hace desaparecer el boton.
+
+**Un comportamiento observado que conviene conocer**: justo despues de un reseteo (o de
+cualquier salto brusco de escena) el total tarda unos frames en subir, porque los tracks recien
+nacidos llegan con `tracker_id = -1` y **no se cuentan hasta confirmarse**. Es correcto, no un
+bug — es la regla de los `-1` funcionando —, pero en la verificacion se vio como `45 / 5` en el
+frame inmediatamente posterior al reset.

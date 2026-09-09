@@ -24,6 +24,7 @@ import { ModelSelector } from './components/ModelSelector';
 import { ConfidenceSlider } from './components/ConfidenceSlider';
 import { RenderSettings, panelDeRenderAplica } from './components/RenderSettings';
 import { TrackingSettings } from './components/TrackingSettings';
+import { ZoneSettings } from './components/ZoneSettings';
 import { MetricsHUD } from './components/MetricsHUD';
 import { MetricsPanel } from './components/MetricsPanel';
 import { LogPanel } from './components/LogPanel';
@@ -55,6 +56,12 @@ export default function InferenceView() {
   const drawSettings = useWorkspaceStore((s) => s.drawSettings);
   const estiloActivo = ESTILOS.find((e) => e.key === drawSettings.boxStyle)?.label ?? '';
   const seguimientoOn = drawSettings.tracking;
+  const cantidadZonas = useStreamStore((s) => s.zonas.length);
+  // Ahora se puede: el umbral dejo de ser un useState del slider y vive en el store.
+  // Era lo unico que faltaba del pendiente #25 para que Parametros tuviera estado, y
+  // el motivo por el que se resolvio no fue estetico — el numero que mostraba el
+  // slider no era el que el sistema usaba.
+  const confianza = useWorkspaceStore((s) => s.confidence);
 
   // Los errores se consultan SIEMPRE, este la seccion abierta o no: un contador de
   // errores que deja de contar al plegarse es peor que no tener contador. Las
@@ -124,7 +131,11 @@ export default function InferenceView() {
 
       {/* ── Zona derecha: parametros + metricas + errores ── */}
       <aside className="flex flex-col gap-5 overflow-y-auto rounded-[var(--radius-lg)] border border-border bg-surface p-4">
-        <Section id="parametros" title="Parametros">
+        <Section
+          id="parametros"
+          title="Parametros"
+          estado={confianza === null ? undefined : `${Math.round(confianza * 100)}%`}
+        >
           <ConfidenceSlider />
         </Section>
 
@@ -146,6 +157,19 @@ export default function InferenceView() {
         {mostrarRender && (
           <Section id="seguimiento" title="Seguimiento" estado={seguimientoOn ? 'ON' : undefined}>
             <TrackingSettings />
+          </Section>
+        )}
+
+        {/* Zonas cuelga de la MISMA condicion que Render y Seguimiento: con un
+            clasificador el backend no compone frame, asi que no hay nada sobre lo que
+            dibujar un poligono ni detecciones con geometria que contar. */}
+        {mostrarRender && (
+          <Section
+            id="zonas"
+            title="Zonas"
+            estado={cantidadZonas > 0 ? String(cantidadZonas) : undefined}
+          >
+            <ZoneSettings />
           </Section>
         )}
 

@@ -8,6 +8,7 @@ import { useWorkspaceStore } from '../store/workspaceStore';
 import { getStrategy } from '../services/registry';
 import { UnsupportedOverlay } from './UnsupportedOverlay';
 import { ModelLoadingOverlay } from './ModelLoadingOverlay';
+import { ZoneEditor } from './ZoneEditor';
 
 interface VisionWorkspaceProps {
   videoRef: RefObject<HTMLVideoElement | null>;
@@ -49,6 +50,11 @@ export function VisionWorkspace({
 
       {/* Capa HTML de overlays (badges de clasificacion, leyendas). */}
       <div ref={overlayRef} className="pointer-events-none absolute inset-0" />
+
+      {/* Editor de zonas. Solo captura el cursor mientras se esta editando; el resto
+          del tiempo es un div inerte que existe para poder medir la caja del canvas.
+          La zona CONFIRMADA no se dibuja aca: la pinta el backend dentro del frame. */}
+      <ZoneEditor canvasRef={canvasRef} />
 
       {/* Estado vacio. */}
       {!hasSource && (

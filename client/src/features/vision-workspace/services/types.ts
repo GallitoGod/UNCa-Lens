@@ -14,6 +14,10 @@ export type BoxStyle = 'box' | 'round' | 'corner' | 'dot';
 // sobre material aereo salen ~70 cajas y no se ve ni la imagen ni las cajas.
 export type LabelMode = 'completa' | 'corta' | 'ninguna';
 
+// Que punto de la caja decide si una deteccion esta ADENTRO de una zona
+// (ZONE_ANCHORS en render/draw_config.py). No es cosmetico: cambia el conteo.
+export type ZoneAnchor = 'centro' | 'inferior';
+
 // Ajustes de dibujo. Desde el 2026-08-26 el que dibuja es el BACKEND: esto es el
 // estado del que el cliente es DUENO (lo persiste en localStorage) y que empuja por
 // POST /config/draw. El cliente ya no los usa para dibujar nada.
@@ -40,6 +44,21 @@ export interface DrawSettings {
   smoothingLength: number; // ventana del promedio
   traces: boolean; // estela del recorrido de cada objeto. REQUIERE tracking
   tracesLength: number; // cuantos frames de recorrido conserva la estela
+
+  // ── Zonas (2026-09-09) ────────────────────────────────────────────────────
+  // OJO, misma separacion que arriba: esto es COMO se ve la zona y QUE cuenta, o
+  // sea preferencia del usuario, y persiste. La GEOMETRIA del poligono NO esta aca
+  // — vive en streamStore, muere con la fuente y no se persiste, porque describe la
+  // escena y no al usuario.
+  zoneColor: string; // ambar por defecto: del mismo color que las cajas se confunde con ellas
+  zoneAnchor: ZoneAnchor; // centro (sirve en vista aerea y de calle) o borde inferior
+  /**
+   * Acumular cuantos objetos DISTINTOS pasaron por cada zona ("12 / 47"), ademas de
+   * cuantos hay ahora. REQUIERE tracking: pedirlo lo prende solo, igual que smoothing
+   * y traces, porque sin identidad no hay como distinguir el mismo objeto durante 30
+   * frames de 30 objetos.
+   */
+  zoneTotal: boolean;
 }
 
 // Todo lo que una estrategia necesita para presentar un frame.

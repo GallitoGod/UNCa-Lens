@@ -9,6 +9,12 @@ import { normalizeAxiosError } from './errors';
 // Host/puerto configurables por entorno (Vite). Default = backend local en :8000.
 const baseURL = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000';
 
+/**
+ * La misma base, para lo que NO pasa por axios: una descarga se dispara con un <a
+ * download>, que necesita la URL completa y no una instancia con interceptores.
+ */
+export const API_BASE = baseURL;
+
 export const api = axios.create({
   baseURL,
   timeout: 10_000,

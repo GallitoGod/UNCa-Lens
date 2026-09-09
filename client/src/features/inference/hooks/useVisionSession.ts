@@ -14,6 +14,7 @@ import {
   type StreamPayload,
   type VideoStreamHandle,
 } from '../services/videoStream';
+import { mensajeGeometria, type Ack, type MensajeGeometria } from '../services/geometry';
 
 interface SessionRefs {
   videoRef: RefObject<HTMLVideoElement | null>;
@@ -27,6 +28,13 @@ export function useVisionSession({ videoRef, canvasRef, overlayRef }: SessionRef
   // Disparadores de re-inferencia para fuentes ESTATICAS (ver stillNonce en el store).
   const stillNonce = useStreamStore((s) => s.stillNonce);
   const activeType = useWorkspaceStore((s) => s.activeModel?.type ?? null);
+  // Zonas de la escena. Cambian al dibujar o borrar una y hay que empujarlas por el
+  // canal de control del WS (ver services/geometry.ts para por que no van por HTTP).
+  const zonas = useStreamStore((s) => s.zonas);
+  // Pedido de "pone la cuenta en cero" (ver zonaReset en streamStore).
+  const zonaReset = useStreamStore((s) => s.zonaReset);
+  // Pedido de empezar/terminar el volcado de detecciones (ver useDetectionExport).
+  const exportNonce = useStreamStore((s) => s.exportNonce);
 
   // Refs vivos a la sesion en curso, para que el effect de navegacion pueda
   // pausar/reanudar SIN re-ejecutar el effect principal (que reconstruiria todo).
@@ -36,6 +44,9 @@ export function useVisionSession({ videoRef, canvasRef, overlayRef }: SessionRef
   // volver a inferir sin re-ejecutar el effect principal (que revoca el objectURL).
   const stillRef = useRef<HTMLCanvasElement | null>(null);
   const renderRef = useRef<((payload: StreamPayload, src: HTMLCanvasElement) => void) | null>(null);
+  // Ultima geometria armada, para que el camino one-shot de imagenes pueda re-mandarla
+  // en cada envio (su WebSocket es efimero: nace sin zonas cada vez).
+  const geometriaRef = useRef<MensajeGeometria | null>(null);
 
   useEffect(() => {
     if (!videoRef.current || !canvasRef.current || !overlayRef.current) return;
@@ -71,6 +82,27 @@ export function useVisionSession({ videoRef, canvasRef, overlayRef }: SessionRef
 
     const setStatus = useStreamStore.getState().setStatus;
 
+    // El backend es la AUTORIDAD sobre la geometria: valida el poligono y responde el
+    // estado efectivo. Si rechaza, el cliente se queda mostrando una zona que del otro
+    // lado no existe, asi que como minimo hay que decirlo.
+    const onAck = (ack: Ack) => {
+      // El volcado: el backend es el unico que sabe si el archivo esta abierto de
+      // verdad, asi que el estado del boton sale del ACK y no del click.
+      if (ack.type === 'export_ack') {
+        useStreamStore.getState().setExportacion({
+          activa: ack.recording,
+          archivo: ack.file ?? null,
+          filas: ack.rows ?? 0,
+          error: ack.error ?? null,
+        });
+        return;
+      }
+      // El backend es la AUTORIDAD sobre la geometria: si rechaza, el cliente se queda
+      // mostrando una zona que del otro lado no existe, asi que como minimo hay que
+      // decirlo.
+      if (ack.error) console.warn('El backend rechazo la geometria:', ack.error);
+    };
+
     // Alinea la pausa con la vista activa actual (leida fresh). Se llama al crear el
     // handle para cubrir la carrera de navegar antes de que getUserMedia resuelva.
     function syncToView() {
@@ -100,7 +132,7 @@ export function useVisionSession({ videoRef, canvasRef, overlayRef }: SessionRef
           video.muted = true;
           await video.play();
           // mirror:true -> espejo solo para camara.
-          handle = startVideoStream({ videoElement: video, mirror: true, onMessage: render, onStatus: setStatus });
+          handle = startVideoStream({ videoElement: video, mirror: true, onMessage: render, onStatus: setStatus, onAck });
           handleRef.current = handle;
           syncToView(); // si arrancamos fuera de Inferencia, nacer en pausa
         } else if (source.kind === 'file-video') {
@@ -109,7 +141,7 @@ export function useVisionSession({ videoRef, canvasRef, overlayRef }: SessionRef
           video.muted = true;
           video.loop = true;
           await video.play();
-          handle = startVideoStream({ videoElement: video, mirror: false, onMessage: render, onStatus: setStatus });
+          handle = startVideoStream({ videoElement: video, mirror: false, onMessage: render, onStatus: setStatus, onAck });
           handleRef.current = handle;
           syncToView();
         } else if (source.kind === 'file-image') {
@@ -124,7 +156,7 @@ export function useVisionSession({ videoRef, canvasRef, overlayRef }: SessionRef
             // Se cachea para poder re-inferir el mismo frame al cambiar de modelo o
             // de umbral, sin volver a cargar la imagen ni tocar el objectURL.
             stillRef.current = tmp;
-            sendSingleFrame(tmp, render);
+            sendSingleFrame(tmp, render, geometriaRef.current);
           };
           img.src = source.url;
         }
@@ -181,6 +213,62 @@ export function useVisionSession({ videoRef, canvasRef, overlayRef }: SessionRef
     });
   }, [activeType, canvasRef, overlayRef]);
 
+  // Geometria de la escena: se empuja por el canal de control del WS cada vez que el
+  // usuario dibuja o borra una zona.
+  //
+  // El tamano declarado sale del CANVAS, que es donde el usuario acaba de dibujar
+  // (present.ts lo fija desde el bitmap que llega del backend). Es la mitad cliente de
+  // la asercion de aspecto del backend: los dos miden lo mismo por su cuenta y tienen
+  // que coincidir, porque el backend anota sobre el frame que le llego y no lo
+  // redimensiona.
+  //
+  // El mensaje se manda SIEMPRE, incluso con la lista vacia: es declarativo y completo,
+  // asi que la lista vacia es como se borra una zona del backend.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !canvas.width || !canvas.height) return;
+
+    // COALESCIDO a proposito, y no es microoptimizacion: arrastrar un vertice escribe
+    // en el store en CADA pointermove (~60/s), y del otro lado cada mensaje reconstruye
+    // el sv.PolygonZone, que RASTERIZA una mascara del tamano del poligono. Sobre un
+    // frame grande eso es del orden de megabytes por evento, sesenta veces por segundo,
+    // compitiendo con los frames en el mismo canal. Ademas seria trabajo tirado: los
+    // estados intermedios de un arrastre se pisan a los 16 ms.
+    //
+    // Los vertices igual se mueven en vivo (el editor los dibuja desde el store); lo
+    // unico que espera es el redibujado del backend, y el ultimo estado SIEMPRE llega
+    // porque el temporizador se reinicia con cada cambio y dispara al soltar.
+    const t = setTimeout(() => {
+      const msg = mensajeGeometria(canvas.width, canvas.height, zonas);
+      geometriaRef.current = msg;
+      handleRef.current?.sendGeometry(msg);
+      // Con una imagen fija no hay frame siguiente donde se vea el cambio: hay que
+      // volver a inferir. Camara y video refrescan solos.
+      if (useStreamStore.getState().source.kind === 'file-image') {
+        useStreamStore.getState().resendStill();
+      }
+    }, 60);
+    return () => clearTimeout(t);
+  }, [zonas, canvasRef]);
+
+  // Reseteo del acumulado de una zona. Va SIN coalescer, al reves que la geometria:
+  // es un pedido explicito y puntual del usuario, no el efecto colateral de un arrastre,
+  // y esperar 60 ms a que "se calme" no tendria nada que esperar.
+  useEffect(() => {
+    if (zonaReset.nonce === 0) return;
+    handleRef.current?.sendControl({ type: 'zone_reset', id: zonaReset.id });
+  }, [zonaReset]);
+
+  // Volcado de detecciones: empezar y terminar viajan por el canal de control, como
+  // el reseteo de zona y por el mismo motivo (el archivo es de ESTA conexion). Bajarlo
+  // no pasa por aca: es una descarga HTTP comun (ver useDetectionExport).
+  useEffect(() => {
+    if (exportNonce.nonce === 0) return;
+    handleRef.current?.sendControl({
+      type: exportNonce.que === 'start' ? 'export_start' : 'export_stop',
+    });
+  }, [exportNonce]);
+
   // Re-inferir el frame fijo cuando cambia un parametro (modelo, umbral). El envio
   // inicial lo hace el effect principal; aca solo se atienden los re-envios, por eso
   // se ignora el nonce 0.
@@ -190,6 +278,6 @@ export function useVisionSession({ videoRef, canvasRef, overlayRef }: SessionRef
     const still = stillRef.current;
     const render = renderRef.current;
     if (!still || !render) return;
-    sendSingleFrame(still, render);
+    sendSingleFrame(still, render, geometriaRef.current);
   }, [stillNonce, source.kind]);
 }

@@ -3,8 +3,9 @@
 import { api } from '@/shared/api/axios';
 
 // POST /config/confidence { value: 0..1 } -> umbral en vivo.
-export async function updateConfidence(value: number): Promise<void> {
-  await api.post('/config/confidence', { value });
+export async function updateConfidence(value: number): Promise<number> {
+  const { data } = await api.post<{ new_confidence?: number }>('/config/confidence', { value });
+  return typeof data.new_confidence === 'number' ? data.new_confidence : value;
 }
 
 export interface Metrics {

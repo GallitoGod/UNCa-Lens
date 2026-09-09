@@ -84,7 +84,7 @@ def build_yolo_v8(output_cfg):
             arr = arr.T
         elif arr.shape[0] < arr.shape[1]:
             arr = arr.T
-        arr = np.ascontiguousarray(arr)
+        arr = np.ascontiguousarray(arr) 
 
         if arr.shape[1] < 5:            # 4 de caja + al menos 1 clase
             return np.empty((0, 6), dtype=np.float32)

@@ -40,6 +40,9 @@ export interface DrawSettingsPayload {
   smoothingLength?: number;
   traces?: boolean;
   tracesLength?: number;
+  zoneColor?: string;
+  zoneAnchor?: string;
+  zoneTotal?: boolean;
   jpegQuality?: number;
 }
 
@@ -69,5 +72,8 @@ export function pushDrawSettings(settings: DrawSettings): void {
     smoothingLength: settings.smoothingLength,
     traces: settings.traces,
     tracesLength: settings.tracesLength,
+    zoneColor: settings.zoneColor,
+    zoneAnchor: settings.zoneAnchor,
+    zoneTotal: settings.zoneTotal,
   }).catch((e) => console.warn('No se pudieron enviar los ajustes de dibujo:', e));
 }

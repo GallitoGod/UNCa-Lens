@@ -14,7 +14,9 @@ import cv2
 from pathlib import Path
 from api.func.model_controller import ModelController
 from api.func.render import (update_draw_config, get_draw_config, BOX_STYLES,
-                             LABEL_MODES, StreamSession)
+                             LABEL_MODES, ZONE_ANCHORS, StreamSession,
+                             EXPORTS_DIR, nombre_seguro)
+from fastapi.responses import FileResponse
 from api.func.reader_pipeline.config_schema import (
     ModelConfig,
     build_config_template,
@@ -26,9 +28,19 @@ _ROOT = Path(__file__).resolve().parent.parent.parent
 MODELS_DIR = _ROOT / "models"
 CONFIGS_DIR = _ROOT / "configs"
 
-MODEL_EXTENSIONS = {".onnx", ".tflite", ".h5", ".keras", ".pt", ".pth"}
-# Orden de preferencia cuando un basename tiene varios archivos (ej: yolo.onnx + yolo.tflite)
-_EXTENSION_PREFERENCE = [".onnx", ".tflite", ".h5", ".keras", ".pt", ".pth"]
+# ".torchscript" es la extension que usa Ultralytics al exportar con torch.jit.save().
+# El archivo es TorchScript igual que un .pt exportado asi —la extension no es parte del
+# formato, torch.jit.load() mira el contenido del zip— pero sin esto el sistema no lo veia
+# y el usuario tenia que renombrarlo, que es peor de lo que parece: los pesos y el config
+# se buscan por BASENAME, asi que renombrar puede hacerlo chocar con otro modelo que ya
+# ocupe ese nombre y quedar inalcanzable en silencio.
+MODEL_EXTENSIONS = {".onnx", ".tflite", ".h5", ".keras", ".torchscript", ".pt", ".pth"}
+# Orden de preferencia cuando un basename tiene varios archivos (ej: yolo.onnx + yolo.tflite).
+# ".torchscript" va ANTES que ".pt"/".pth" a proposito: es TorchScript por construccion y
+# siempre carga, mientras que un ".pt" puede ser un checkpoint pickle que pytorchLoader NO
+# puede abrir (paso con models/best.pt en agosto: torch.jit.load exige TorchScript). Ante
+# dos archivos del mismo modelo, se elige el que seguro funciona.
+_EXTENSION_PREFERENCE = [".onnx", ".tflite", ".h5", ".keras", ".torchscript", ".pt", ".pth"]
 
 app = FastAPI(
     title="UNCaLens — Sistema de Vision por Computadora",
@@ -119,6 +131,21 @@ class DrawSettingsRequest(BaseModel):
     tracesLength: Optional[int] = Field(
         default=None, ge=2, le=200,
         description="Cuantos frames de recorrido conserva cada estela")
+    zoneColor: Optional[str] = Field(default=None, pattern=r"^#[0-9A-Fa-f]{6}$",
+                                     description="Color del contorno y el contador de las zonas, formato #RRGGBB")
+    zoneTotal: Optional[bool] = Field(
+        default=None,
+        description=("Acumular cuantos objetos DISTINTOS pasaron por cada zona, ademas "
+                     "de cuantos hay ahora (el cartel pasa de '12' a '12 / 47'). "
+                     "REQUIERE tracking: pedirlo lo prende solo, y apagar el tracking "
+                     "lo apaga. Sin identidad no hay como distinguir el mismo objeto "
+                     "durante 30 frames de 30 objetos."))
+    zoneAnchor: Optional[Literal["centro", "inferior"]] = Field(
+        default=None,
+        description=("Que punto de la caja decide si una deteccion esta adentro de "
+                     "una zona: 'centro' (sirve igual en vista aerea y de calle) o "
+                     "'inferior' (donde el objeto toca el piso; correcto para camaras "
+                     "de calle). Cambia el conteo, no el dibujo."))
     jpegQuality: Optional[int] = Field(default=None, ge=1, le=100,
                                        description="Calidad del re-encode del frame compuesto")
 
@@ -130,6 +157,8 @@ assert set(get_args(DrawSettingsRequest.model_fields["boxStyle"].annotation.__ar
     "El Literal de boxStyle quedo desincronizado de BOX_STYLES")
 assert set(get_args(DrawSettingsRequest.model_fields["labelMode"].annotation.__args__[0])) == set(LABEL_MODES), (
     "El Literal de labelMode quedo desincronizado de LABEL_MODES")
+assert set(get_args(DrawSettingsRequest.model_fields["zoneAnchor"].annotation.__args__[0])) == set(ZONE_ANCHORS), (
+    "El Literal de zoneAnchor quedo desincronizado de ZONE_ANCHORS")
 
 
 class ModelPathRequest(BaseModel):
@@ -245,6 +274,19 @@ def select_model(data: SelectModelRequest):
         "status": "ok",
         "message": f"Modelo cargado y validado: {data.model_name}",
         "validation": validation,
+        # El umbral EFECTIVO con el que quedo el modelo, para que el cliente muestre el
+        # numero que el sistema realmente usa y no uno propio.
+        #
+        # Existe porque el slider del cliente arrancaba en un 50% hardcodeado que nunca
+        # se enviaba ni se leia: el panel decia 50% mientras el backend filtraba a 0,15
+        # (lo que declara configs/best.json), y mas de la mitad de las detecciones
+        # dibujadas y exportadas estaban por debajo del numero que el panel afirmaba.
+        #
+        # Se devuelve desde ACA y no se deja que el cliente lo lea del JSON del config
+        # porque eso seria INFERIRLO: esto es lo que el controller tiene cargado, que es
+        # la unica respuesta que no puede quedar desincronizada. Mismo criterio que el
+        # "estado efectivo" de /config/draw y del ack de geometria.
+        "confidence": controller.confidence_threshold,
     }
 
 
@@ -259,6 +301,7 @@ def load_model(data: ModelPathRequest):
         "status": "ok",
         "message": f"Modelo cargado y validado: {data.model_path}",
         "validation": validation,
+        "confidence": controller.confidence_threshold,   # el efectivo, ver /select_model
     }
 
 
@@ -274,7 +317,11 @@ def update_confidence(data: ConfidenceUpdateRequest):
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
-    return {"status": "ok", "new_confidence": data.value}
+    # El EFECTIVO leido del controller, no el pedido: misma regla que /config/draw y
+    # que el ack de geometria. Hoy coinciden siempre (el endpoint valida el rango antes
+    # de escribir), y justamente por eso devolver el leido no cuesta nada y deja de ser
+    # una promesa que hay que revisar si algun dia el controller ajusta el valor.
+    return {"status": "ok", "new_confidence": controller.confidence_threshold}
 
 
 # ════════════════════════════════════════
@@ -310,6 +357,9 @@ def update_draw(data: DrawSettingsRequest):
         smoothing_length=data.smoothingLength,
         traces=data.traces,
         traces_length=data.tracesLength,
+        zone_color=data.zoneColor,
+        zone_anchor=data.zoneAnchor,
+        zone_total=data.zoneTotal,
         jpeg_quality=data.jpegQuality,
     )
     # Se devuelve el estado EFECTIVO completo, no el pedido: asi el cliente puede
@@ -334,6 +384,9 @@ def update_draw(data: DrawSettingsRequest):
             "smoothingLength": cfg.smoothing_length,
             "traces": cfg.traces,
             "tracesLength": cfg.traces_length,
+            "zoneColor": cfg.zone_color,
+            "zoneAnchor": cfg.zone_anchor,
+            "zoneTotal": cfg.zone_total,
             "jpegQuality": cfg.jpeg_quality,
         },
     }
@@ -352,6 +405,72 @@ def unload_model():
 # ════════════════════════════════════════
 # 4 WebSocket streaming con inferencia
 # ════════════════════════════════════════
+
+def _decode_control(message: dict):
+    """
+    El mensaje de CONTROL que trae el cliente, o None si lo que llego es un frame.
+
+    LA TRAMPA, y por eso esto corre ANTES que _decode_frame: el canal de texto YA
+    esta ocupado por los frames en base64 (compatibilidad). Un mensaje de control en
+    texto caeria en esa rama, no decodificaria como imagen, y el cliente recibiria
+    'frame_invalido' por un mensaje que no tiene nada de invalido.
+
+    El discriminador no es ambiguo: cuenta como control solo si el texto parsea como
+    OBJETO JSON con una clave "type" de tipo string. Un JPEG en base64 nunca parsea
+    asi — empieza con "/9j/" o con "data:image/jpeg;base64,".
+
+    El chequeo de la primera llave es lo que evita pagar un json.loads sobre cada
+    frame base64, que puede pesar cientos de KB.
+    """
+    if message.get("bytes") is not None:
+        return None
+    text = message.get("text")
+    if not text or not text.lstrip().startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    if isinstance(parsed, dict) and isinstance(parsed.get("type"), str):
+        return parsed
+    return None
+
+
+def _responder_control(control: dict, session: StreamSession) -> dict:
+    """
+    Atiende un mensaje de control y devuelve SU respuesta.
+
+    La invariante del stream no cambia: UN mensaje por mensaje recibido. Un control
+    se contesta con un ack —nunca con silencio— porque el cliente no distingue "no me
+    contestaron todavia" de "se perdio", y porque romper el "siempre responde"
+    reintroduce el deadlock que el timeout de 3 s solo tapa.
+    """
+    tipo = control.get("type")
+    if tipo == "export_start":
+        # Abre el volcado de detecciones de ESTA conexion. Va por el WS y no por HTTP
+        # por lo mismo que la geometria: un POST no sabe a que stream le esta hablando,
+        # y lo que se exporta son las detecciones de este stream.
+        return session.start_export(controller.model_name)
+    if tipo == "export_stop":
+        return session.stop_export()
+    if tipo == "zone_reset":
+        # Pone en cero el acumulado de una zona ("id") o de todas (sin "id"). Va por el
+        # mismo canal que la geometria y por la misma razon: el contador vive en ESTA
+        # conexion. No se re-emite al reconectar — una conexion nueva ya nace en cero.
+        zid = control.get("id")
+        if zid is not None and not isinstance(zid, str):
+            return {"type": "zone_reset_ack", "zone": None,
+                    "error": "el 'id' de la zona tiene que ser un texto"}
+        return session.reset_zone_count(zid)
+    if tipo == "geometry":
+        # La geometria se direcciona sola: llego por la conexion a la que pertenece.
+        # Un POST no sabria a que WebSocket le esta hablando, y ademas competiria con
+        # los frames en vuelo (no estaria definido si el frame N se compone con la
+        # zona vieja o la nueva). Por el mismo canal, el orden ES el orden.
+        return session.set_geometry(control)
+    return {"type": "control_error",
+            "error": "tipo de control desconocido: %s" % tipo}
+
 
 def _decode_frame(message: dict):
     """Acepta frames JPEG binarios (protocolo actual) o base64 (compatibilidad)."""
@@ -388,6 +507,14 @@ async def video_stream(websocket: WebSocket):
     campo. El despacho es por strategy.output_kind, NO por 'task': agregar un tipo
     nuevo no hace crecer este handler.
 
+    Ademas del frame, el cliente puede mandar mensajes de CONTROL por el canal de texto
+    (desde el 2026-09-09): un objeto JSON con clave "type" que no es un frame. Hoy el
+    unico es "geometry", que declara las zonas poligonales de ESTA conexion y se contesta
+    con un ack con el estado efectivo. Se discrimina ANTES de intentar decodificar el
+    frame, porque el canal de texto ya estaba ocupado por los frames en base64 (ver
+    _decode_control). No es una excepcion a la invariante: sigue habiendo UN mensaje de
+    respuesta por cada mensaje recibido.
+
     SIEMPRE se responde (aunque el frame sea invalido o falle la inferencia) para que
     el cliente nunca quede esperando un frame que no va a llegar. Romper eso
     reintroduce el deadlock del stream.
@@ -406,6 +533,14 @@ async def video_stream(websocket: WebSocket):
             message = await websocket.receive()
             if message.get("type") == "websocket.disconnect":
                 break
+
+            # Canal de CONTROL: la geometria de zonas viaja por aca, no por HTTP.
+            # Se mira antes que nada porque comparte el canal de texto con los frames
+            # en base64 (ver _decode_control).
+            control = _decode_control(message)
+            if control is not None:
+                await websocket.send_json(_responder_control(control, session))
+                continue
 
             response = {"task": None, "result": None, "error": None}
             frame_bytes = None            # != None -> la respuesta va BINARIA
@@ -440,6 +575,12 @@ async def video_stream(websocket: WebSocket):
                                 controller.confidence_threshold)
                             controller.perf.push_track(
                                 (time.perf_counter() - t_track) * 1000)
+                            # DESPUES de process(), no antes: asi las filas llevan el
+                            # tracker_id, que es lo unico que permite reconstruir el
+                            # recorrido de un objeto a partir del archivo.
+                            session.export_frame(
+                                result, controller.model_name,
+                                time.perf_counter() * 1000)
                             # El render recibe el img_bgr que YA teniamos decodificado:
                             # no hay un decode extra por frame.
                             return None, controller.render_result(result, img_bgr, session)
@@ -466,6 +607,33 @@ async def video_stream(websocket: WebSocket):
 
     except WebSocketDisconnect:
         pass
+    finally:
+        # Sin esto, un volcado en curso quedaria sin su cierre y el archivo no seria un
+        # JSON valido. Corre igual si el cliente se va sin avisar.
+        session.close()
+
+
+# ════════════════════════════════════════
+# 4b Descarga del volcado de detecciones
+# ════════════════════════════════════════
+
+@app.get("/exports/{name}", summary="Descargar un volcado de detecciones")
+def download_export(name: str):
+    """Sirve un archivo de exports/ para que el cliente lo baje como cualquier descarga.
+
+    Por que HTTP y no el WebSocket: el archivo puede tener cientos de miles de filas y
+    mandarlo por el canal de control seria empujar megabytes de JSON por donde viajan
+    los frames. El WS abre y cierra el volcado (es estado de la conexion); bajarlo es
+    una descarga comun, igual que la del video grabado.
+
+    422 si el nombre no es seguro, 404 si no existe.
+    """
+    if not nombre_seguro(name):
+        raise HTTPException(status_code=422, detail=f"Nombre de archivo inseguro: {name}")
+    ruta = EXPORTS_DIR / name
+    if not ruta.is_file():
+        raise HTTPException(status_code=404, detail=f"No existe el volcado '{name}'.")
+    return FileResponse(ruta, media_type="application/json", filename=name)
 
 
 # ════════════════════════════════════════

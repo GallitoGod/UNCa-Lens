@@ -222,15 +222,19 @@ def render_detection(result, img_bgr, draw_cfg=None, session=None) -> bytes:
     """
     cfg = draw_cfg if draw_cfg is not None else get_draw_config()
 
-    if len(result) == 0:
+    # La resolucion entra en la busqueda de annotators porque el grosor y la escala
+    # del texto se derivan de ella (auto_scale). Es (ancho, alto), no el shape de numpy.
+    h, w = img_bgr.shape[:2]
+    # Una zona se dibuja aunque no haya ni una deteccion: "0 adentro" es informacion,
+    # y una zona que desaparece cuando la escena se vacia se lee como un bug.
+    hay_zonas = session is not None and session.tiene_geometria
+
+    if len(result) == 0 and not hay_zonas:
         # Nada que dibujar: se re-encodea el frame tal cual, sin copiarlo. Las trazas
         # tampoco pintan nada sin detecciones (verificado), asi que este camino sigue
         # siendo seguro: nadie escribe sobre un frame que no copiamos.
         scene = img_bgr
     else:
-        # La resolucion entra en la busqueda porque el grosor y la escala del texto
-        # se derivan de ella (auto_scale). Es (ancho, alto), no el shape de numpy.
-        h, w = img_bgr.shape[:2]
         ann = annotators_for(cfg, (w, h))
         # El .copy() va aca (antes estaba en la llamada al box): los annotators
         # escriben IN-PLACE y ahora hay mas de uno encadenado sobre la misma escena.
@@ -238,6 +242,14 @@ def render_detection(result, img_bgr, draw_cfg=None, session=None) -> bytes:
         # El orden es el de las capas y no es negociable: primero el relleno, despues
         # el contorno, al final las etiquetas. Al reves el sombreado se comeria el
         # trazo de la caja y el texto que van arriba.
+        #
+        # Las ZONAS van primero de todo, debajo incluso del sombreado: son geometria
+        # de la escena, no del resultado, y el resultado es lo que el usuario esta
+        # mirando. Su contador puede quedar tapado si hay decenas de carteles encima,
+        # y para eso existe el modo de etiqueta "ninguna" (#27) — que se hizo antes
+        # que esto justamente por eso.
+        if hay_zonas:
+            scene = session.anotar_zonas(scene, result, cfg, (w, h))
         if ann.shade is not None:
             scene = ann.shade.annotate(scene=scene, detections=result)
         # Las trazas van DEBAJO de la caja: son contexto historico y no deben competir

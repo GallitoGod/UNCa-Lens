@@ -212,6 +212,17 @@ pantalla es obvia.
 
 ### 4.4 Zonas poligonales · `sv.PolygonZone` — **0,03 ms** · NO requiere tracking
 
+> ✅ **HECHO el 2026-09-09.** Medido en el sistema real: **~0,07 ms por zona** con 70
+> detecciones (incluye el test de pertenencia Y el `PolygonZoneAnnotator`), y **escala con
+> la cantidad de ZONAS, no con la de detecciones ni con la de vértices** — 16 vértices
+> cuestan lo mismo que 4, porque la máscara se rasteriza una vez al construir la zona.
+> Este apartado acertaba en todo salvo en una cosa: decía "el backend es trivial", y lo
+> caro no fue sólo el editor. La decisión de diseño más costosa fue **dónde vive la
+> geometría** — el payload que este catálogo proponía metía las zonas junto al tracking, y
+> eso las habría borrado al cambiar de modelo, que es justo el caso de uso que las
+> justifica. `StreamSession` tuvo que partirse en dos cajones. Ver
+> `docs/superpowers/specs/2026-08-28-zonas-y-lineas-de-conteo-design.md` §3 y §10.
+
 **Qué es.** Un polígono sobre la escena que responde, frame a frame, cuántas detecciones
 están adentro y cuáles. `PolygonZoneAnnotator` lo pinta con su contador.
 
@@ -226,6 +237,20 @@ banco: acotar la evaluación a la región que importa ("ignorá la vereda de enf
 qué tal anda el modelo en el carril").
 
 ### 4.5 Líneas de conteo · `sv.LineZone` — **0,05 ms** · requiere `tracker_id`
+
+> ⛔ **DESCARTADAS el 2026-09-09 por decisión del usuario**, y no por costo: *"estaríamos
+> dándole demasiadas perillas al sistema"*. El apartado de abajo se corrigió el 2026-08-28
+> por juzgarlas contra un objetivo de menos, y esa corrección **sigue siendo válida**: bajo
+> el objetivo educativo las líneas sí aportan valor. Lo que cambió no es el valor sino el
+> **precio en superficie de control** — y en el medio la zona aprendió a contar
+> (`zone_total`), así que lo único que la línea seguía aportando en exclusiva es la
+> **dirección** del cruce. Eso solo no paga otro editor, otro modo, otro contador y otro
+> bloque de panel en una columna de 230 px.
+>
+> **La lección para el resto del catálogo**: además de las dos preguntas de valor (¿mide al
+> modelo? ¿hace visible lo que hace?) hay una tercera, de costo, que este documento no
+> tenía escrita: **¿cuántos controles nuevos le agrega a la app?** Una feature valiosa
+> puede no entrar igual, y varias features valiosas seguidas se pagan entre todas.
 
 **Qué es.** Un segmento que cuenta cuántos objetos lo cruzaron en cada sentido; la variante
 `LineZoneAnnotatorMulticlass` lleva un contador por clase.
@@ -300,6 +325,16 @@ Tiene que ser una opción explícita con su tamaño de tile a la vista, **jamás
 de tiempo real. En cámara o video es inviable a 30 fps.
 
 ### 5.2 Exportar detecciones · `sv.CSVSink` / `sv.JSONSink`
+
+> ✅ **HECHO el 2026-09-09.** Se usó el **parseador** de `sv.JSONSink`
+> (`parse_detection_data`) pero **no el sink**: el de supervision acumula todas las filas en
+> memoria y las vuelca al cerrar, y con ~70 detecciones por frame eso son ~250.000 filas en
+> dos minutos. El archivo se escribe **incrementalmente**. Dos cosas que este apartado no
+> anticipaba: (a) el `tracker_id` sale como **string vacío** cuando no hay tracking —
+> correcto en CSV, mentira de tipo en JSON — y se normaliza a `null`; (b) el trabajo de
+> producto que el apartado marcaba como "el trabajo real" se resolvió partiendo el canal:
+> **abrir y cerrar por el WebSocket** (el archivo es de esa conexión) y **bajarlo por HTTP**
+> (puede pesar megabytes). Ver §7 de `CLAUDE.md`, tanda del 2026-09-09.
 
 **Qué es.** Escritores que vuelcan las detecciones de cada frame a CSV o JSON, con sus
 campos y los datos extra que lleve el `sv.Detections`.

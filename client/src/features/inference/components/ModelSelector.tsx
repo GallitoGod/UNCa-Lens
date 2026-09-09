@@ -32,7 +32,12 @@ export function ModelSelector() {
     if (useWorkspaceStore.getState().loadingModel) return; // una carga por vez
     setLoadingModel(name);
     try {
-      await selectModel.mutateAsync(name);
+      // El umbral EFECTIVO del modelo recien cargado. Se adopta en vez de imponerle
+      // el que hubiera en pantalla: cada config trae el suyo calibrado (best usa 0.15
+      // por ser vista aerea con objetos chicos) y pisarlo con un valor generico dejaria
+      // al modelo casi sin detecciones.
+      const umbral = await selectModel.mutateAsync(name);
+      if (umbral !== null) useWorkspaceStore.getState().setConfidence(umbral);
       // Leer el model_type real del config (GET /configs/{name}) para enrutar la
       // estrategia del workspace. Si no se puede leer, se asume 'detection' (es el
       // unico tipo cargable hoy; CLS/SEG aun dan 501 al cargar en el backend).

@@ -15,6 +15,7 @@ export type SectionId =
   | 'render'
   | 'etiquetas'
   | 'seguimiento'
+  | 'zonas'
   | 'metricas';
 
 // Que nace abierto y que no, elegido por CUANTO SE TOCA cada cosa, no por orden:
@@ -22,6 +23,8 @@ export type SectionId =
 //   - parametros: el umbral es el control mas tocado de la app.
 //   - metricas: es un instrumento, se mira de reojo mientras se hace otra cosa.
 //   - render/seguimiento: configurar-y-olvidar; se abren cuando se los busca.
+//   - zonas: cerrada. Dibujar una zona es una decision, no algo que se toque seguido,
+//     y su encabezado plegado dice cuantas hay.
 //   - etiquetas: ANIDADA dentro de render, y por eso nace ABIERTA: ya esta escondida
 //     detras del plegado del padre, y dejarla cerrada obligaria a dos clicks para
 //     llegar a un control que se toca seguido con modelos de muchas detecciones.
@@ -34,6 +37,7 @@ const SECCIONES_POR_DEFECTO: Record<SectionId, boolean> = {
   render: false,
   etiquetas: true,
   seguimiento: false,
+  zonas: false,
   metricas: true,
 };
 

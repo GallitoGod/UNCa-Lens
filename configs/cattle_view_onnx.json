@@ -1,0 +1,84 @@
+{
+  "model_type": "detection",
+  "input": {
+    "width": 640,
+    "height": 640,
+    "channels": 3,
+    "normalize": true,
+    "mean": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "std": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "scale": true,
+    "letterbox": true,
+    "auto_pad_color": [
+      114,
+      114,
+      114
+    ],
+    "preserve_aspect_ratio": true,
+    "color_order": "RGB",
+    "input_str": {
+      "layout": "NCHW",
+      "dtype": "float32"
+    }
+  },
+  "output": {
+    "apply_conf_filter": true,
+    "confidence_threshold": 0.25,
+    "apply_nms": true,
+    "top_k": 0,
+    "nms_per_class": true,
+    "nms_threshold": 0.45,
+    "tensor_structure": {
+      "box_format": "xyxy",
+      "coordinates": {
+        "x1": 0,
+        "y1": 1,
+        "x2": 2,
+        "y2": 3
+      },
+      "confidence_index": 4,
+      "class_index": 5,
+      "num_classes": 1
+    },
+    "pack_format": "yolo_v8",
+    "anchor_config": null,
+    "label_map": [
+      "vaca"
+    ]
+  },
+  "runtime": {
+    "runtimeShapes": {
+      "input_width": 0,
+      "input_height": 0,
+      "channels": 3,
+      "out_coords_space": "tensor_pixels"
+    },
+    "backend": "onnxruntime",
+    "device": "gpu",
+    "threads": {
+      "intra_op": null,
+      "inter_op": null,
+      "num_threads": null
+    },
+    "onnx": {
+      "providers": [
+        "CUDAExecutionProvider",
+        "CPUExecutionProvider"
+      ],
+      "provider_options": {}
+    },
+    "tflite": null,
+    "warmup": {
+      "runs": 0,
+      "enabled": true
+    }
+  }
+}

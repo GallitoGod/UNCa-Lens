@@ -1,7 +1,25 @@
-// useRecorder.ts — graba el canvas de salida a .webm y lo descarga, inyectando la
-// metadata de DURACION con fix-webm-duration. MediaRecorder produce webm sin duracion
-// (no se puede hacer seek / muestra duracion infinita); esta es la regla estricta del
-// SDD 4.1.3. La logica vive aca (hook) y Recorder.tsx queda como un boton fino.
+// useRecorder.ts — graba el canvas de salida a un archivo y lo descarga. La logica
+// vive aca (hook) y Recorder.tsx queda como un boton fino.
+//
+// EL FORMATO SE ELIGE, NO SE ASUME (2026-09-09). Antes esto grababa siempre `.webm`,
+// que es lo que MediaRecorder soportaba cuando se escribio, y arrastraba un parche
+// —`fix-webm-duration`— porque el webm que produce MediaRecorder sale SIN duracion
+// legible: no se puede hacer seek y los reproductores muestran duracion infinita.
+//
+// Medido en el runtime real (Electron 32 = Chromium 128, no en un navegador de
+// escritorio, que puede diferir), grabando 2 s del mismo canvas:
+//
+//   video/mp4;codecs=avc1.42E01E   44.425 bytes   duracion leida: 1,976 s
+//   video/webm;codecs=vp9          69.285 bytes   duracion leida: NULL
+//
+// O sea: con mp4 el problema de la duracion no se arregla, DEJA DE EXISTIR, el archivo
+// pesa menos y ademas abre en cualquier reproductor y editor de Windows sin pedir VLC.
+// El parche queda SOLO en el camino webm, que sigue existiendo como respaldo.
+//
+// La eleccion es por deteccion de capacidades y no por version: `isTypeSupported` es la
+// unica fuente honesta —depende del build de Chromium y de los codecs del sistema— y
+// asi un Electron mas viejo (o uno futuro que quite un codec) sigue grabando algo en
+// vez de fallar.
 
 import { useCallback, useRef, useState, type RefObject } from 'react';
 import fixWebmDuration from 'fix-webm-duration';
@@ -9,9 +27,41 @@ import fixWebmDuration from 'fix-webm-duration';
 // captureStream existe en HTMLCanvasElement pero no siempre esta en los tipos DOM.
 type CanvasWithCapture = HTMLCanvasElement & { captureStream(fps?: number): MediaStream };
 
+interface Formato {
+  mime: string;
+  ext: string;
+  /** Si hay que inyectarle la duracion a mano despues de grabar. */
+  parcheDuracion: boolean;
+}
+
+// En orden de preferencia. El primero que el runtime soporte, gana.
+//
+// El avc1.42E01E explicito va PRIMERO y el "video/mp4" pelado despues: pedir el perfil
+// (Baseline 3.0) es lo mas compatible que existe para reproducir en cualquier lado, y
+// dejarlo librado al navegador puede darte un perfil que despues un editor no abre.
+const FORMATOS: Formato[] = [
+  { mime: 'video/mp4;codecs=avc1.42E01E', ext: 'mp4', parcheDuracion: false },
+  { mime: 'video/mp4', ext: 'mp4', parcheDuracion: false },
+  { mime: 'video/webm;codecs=vp9', ext: 'webm', parcheDuracion: true },
+  { mime: 'video/webm', ext: 'webm', parcheDuracion: true },
+];
+
+/**
+ * El mejor formato que este runtime puede grabar, o null si no puede ninguno.
+ *
+ * Exportada para poder verificarla desde afuera (y para que el panel pueda decir en
+ * que formato va a grabar antes de apretar el boton).
+ */
+export function elegirFormato(): Formato | null {
+  if (typeof MediaRecorder === 'undefined') return null;
+  return FORMATOS.find((f) => MediaRecorder.isTypeSupported(f.mime)) ?? null;
+}
+
 export interface RecorderControls {
   recording: boolean;
   error: string | null;
+  /** Extension del archivo que se va a producir ('mp4' | 'webm'), para mostrarla. */
+  formato: string | null;
   start: () => void;
   stop: () => void;
 }
@@ -22,12 +72,17 @@ export function useRecorder(canvasRef: RefObject<HTMLCanvasElement | null>): Rec
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunks = useRef<Blob[]>([]);
   const startedAt = useRef(0); // performance.now() del inicio, para medir la duracion real
+  // Formato con el que se esta grabando AHORA. Se fija al arrancar y no se relee: si
+  // cambiara a mitad de una grabacion, los trozos no se podrian juntar en un blob.
+  const formatoRef = useRef<Formato | null>(null);
 
-  const download = useCallback((blob: Blob) => {
+  const formato = elegirFormato();
+
+  const download = useCallback((blob: Blob, ext: string) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'grabacion.webm';
+    a.download = `grabacion.${ext}`;
     a.click();
     URL.revokeObjectURL(url);
   }, []);
@@ -39,35 +94,44 @@ export function useRecorder(canvasRef: RefObject<HTMLCanvasElement | null>): Rec
       setError('No hay canvas de salida para grabar.');
       return;
     }
-    if (typeof MediaRecorder === 'undefined') {
-      setError('MediaRecorder no esta disponible en este entorno.');
+    const elegido = elegirFormato();
+    if (!elegido) {
+      setError('Este entorno no puede grabar video (MediaRecorder no disponible).');
       return;
     }
 
     let recorder: MediaRecorder;
     try {
       const stream = canvas.captureStream(30);
-      recorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+      recorder = new MediaRecorder(stream, { mimeType: elegido.mime });
     } catch (e) {
       setError(`No se pudo iniciar la grabacion: ${e instanceof Error ? e.message : String(e)}`);
       return;
     }
 
+    formatoRef.current = elegido;
     chunks.current = [];
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) chunks.current.push(e.data);
     };
     recorder.onstop = () => {
-      const raw = new Blob(chunks.current, { type: 'video/webm' });
+      const usado = formatoRef.current ?? elegido;
+      const raw = new Blob(chunks.current, { type: usado.mime });
       chunks.current = [];
+
+      if (!usado.parcheDuracion) {
+        // mp4: el moov sale completo, con duracion. Nada que parchear.
+        download(raw, usado.ext);
+        return;
+      }
       const durationMs = performance.now() - startedAt.current;
-      // Inyecta la duracion; si fix-webm-duration falla, descargamos el blob crudo
-      // igual (mejor un webm sin metadata que perder la grabacion).
+      // Camino webm (respaldo): inyecta la duracion; si el parche falla, se descarga
+      // el blob crudo igual — mejor un webm sin metadata que perder la grabacion.
       fixWebmDuration(raw, durationMs, { logger: false })
-        .then(download)
+        .then((b) => download(b, usado.ext))
         .catch((e) => {
           console.warn('fix-webm-duration fallo, se descarga sin metadata:', e);
-          download(raw);
+          download(raw, usado.ext);
         });
     };
 
@@ -78,10 +142,10 @@ export function useRecorder(canvasRef: RefObject<HTMLCanvasElement | null>): Rec
   }, [canvasRef, download]);
 
   const stop = useCallback(() => {
-    recorderRef.current?.stop(); // dispara onstop -> fix + descarga
+    recorderRef.current?.stop(); // dispara onstop -> (parche) + descarga
     recorderRef.current = null;
     setRecording(false);
   }, []);
 
-  return { recording, error, start, stop };
+  return { recording, error, formato: formato?.ext ?? null, start, stop };
 }

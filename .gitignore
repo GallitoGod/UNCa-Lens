@@ -26,3 +26,4 @@ models/saved_model_class.pb
 # de LFS (pendientes #11/#13). La app abre el archivo por el selector del cliente,
 # asi que no necesita estar trackeado para funcionar.
 media/
+exports/

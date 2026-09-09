@@ -31,6 +31,11 @@ class ModelController:
         # Estrategia activa (TaskStrategy): da el task y el serializador para el envelope.
         self._strategy = None
         self.model_format = None
+        # Nombre base del modelo cargado ('best', 'yolov7-tiny'). No lo usa el pipeline:
+        # existe para que lo que SALE del sistema pueda decir de donde vino — hoy, cada
+        # fila del volcado de detecciones (render/export.py), que si no seria un archivo
+        # de numeros sin procedencia.
+        self.model_name = None
         self.config = None
         self.logger = None
         self.perf = PerfMeter(window=300)
@@ -139,6 +144,7 @@ class ModelController:
             self._frame_idx = 0
             self._generation += 1
             self.model_format = os.path.splitext(model_path)[1].lower()
+            self.model_name = os.path.splitext(os.path.basename(model_path))[0]
             self.config = config
             self._strategy = strategy
             self._runner = runner
@@ -220,6 +226,7 @@ class ModelController:
             self._runner = None
             self._strategy = None
             self.model_format = None
+            self.model_name = None
             self.config = None
 
 

@@ -16,6 +16,8 @@ from dataclasses import dataclass, replace
 from threading import Lock
 from typing import Tuple
 
+import supervision as sv
+
 # Estilos de caja ofrecidos. Se dejan CUATRO a proposito de una familia de doce:
 # un selector de doce opciones es exactamente el ruido que el wizard de modelos ya
 # tuvo que podar en junio. Cada uno resuelve un caso real:
@@ -45,6 +47,23 @@ BOX_STYLES = ("box", "round", "corner", "dot")
 # volviendo a un dato menos legible es cambiar el problema de lugar; sacar la confianza
 # ahorra parecido sin perder que es cada cosa.
 LABEL_MODES = ("completa", "corta", "ninguna")
+
+# Que punto de la caja decide si una deteccion esta ADENTRO de una zona poligonal.
+# No es un detalle cosmetico: cambia lo que la zona cuenta, y el resultado correcto
+# depende de desde donde mira la camara.
+#   centro   -> el centro de la caja. Es el unico anclaje que se comporta igual en
+#               vista aerea y en vista de calle, y por eso es el default: el primer
+#               modelo propio del usuario ('best', VisDrone) es de DRON, y ahi el
+#               "pie" de la caja no significa nada porque el objeto se ve desde
+#               arriba.
+#   inferior -> el borde inferior, donde el objeto "toca el piso". Es el default de
+#               supervision y lo correcto para una camara de calle a la altura de la
+#               vista: un auto esta en el carril donde apoyan sus ruedas, no donde
+#               queda el centro de su caja, que puede caer sobre la vereda de al lado.
+# Se expone al usuario (pedido explicito, 2026-08-28) porque ver como cambia el
+# conteo al cambiar el anclaje es exactamente la clase de cosa que el objetivo
+# educativo del sistema quiere hacer visible.
+ZONE_ANCHORS = ("centro", "inferior")
 
 
 @dataclass(frozen=True)
@@ -126,6 +145,32 @@ class DrawConfig:
     traces: bool = False
     traces_length: int = 30
 
+    # ── Zonas poligonales ─────────────────────────────────────────────────────
+    # OJO, la misma separacion que el Tier B: esto es COMO se dibuja y que se cuenta,
+    # o sea preferencia del usuario. La GEOMETRIA del poligono no esta aca — vive en
+    # la conexion (render/geometry.py) porque describe la escena, no al usuario, y no
+    # se persiste. Que el color de la zona sobreviva a cambiar de fuente esta bien;
+    # que sobreviva el poligono, no.
+    #
+    # Ambar y no el cian de las cajas: una zona del mismo color que las detecciones
+    # se confunde con ellas justo cuando hay muchas, que es cuando la zona sirve.
+    zone_color: str = "#FFB020"
+    zone_anchor: str = "centro"     # uno de ZONE_ANCHORS
+
+    # Acumular cuantos objetos DISTINTOS pasaron por la zona, ademas de cuantos hay
+    # ahora. El cartel pasa de "12" a "12 / 47".
+    #
+    # REQUIERE tracking, y no es una preferencia sino la definicion del problema: sin
+    # identidad no hay forma de distinguir "el mismo auto durante 30 frames" de "30
+    # autos". Por eso update_draw_config() lo prende solo, igual que con smoothing y
+    # traces. La OCUPACION instantanea, en cambio, no necesita nada: es un test de
+    # punto en poligono.
+    #
+    # Nace apagado: el numero acumulado solo tiene sentido sobre una secuencia, y
+    # arrastra el costo del tracking (~0,54 ms/frame) para algo que no todo el mundo
+    # quiere mirar.
+    zone_total: bool = False
+
     # Calidad del re-encode JPEG del frame compuesto. El frame ya llego comprimido a
     # 0.8 desde el cliente, asi que esto es una SEGUNDA compresion: es perdida de
     # calidad, no de latencia. Configurable para poder subirla si se ve degradacion.
@@ -163,8 +208,8 @@ def update_draw_config(**patch) -> DrawConfig:
     # escritura del singleton: asi no existe forma de dejar el estado en una
     # combinacion imposible, la valide quien la valide.
     #
-    # El suavizado y las trazas trabajan POR tracker_id, asi que sin tracking no
-    # tienen con que. Y fallan distinto, lo cual es peor que si fallaran igual: el
+    # El suavizado, las trazas y el acumulado de zona trabajan POR tracker_id, asi que
+    # sin tracking no tienen con que. Y fallan distinto, lo cual es peor que si fallaran igual: el
     # suavizado no suaviza y avisa (toggle prendido sin efecto, el sintoma que el
     # catalogo prohibe), mientras que el TraceAnnotator directamente levanta
     # ValueError y rompe el frame. En vez de dejar que el usuario arme ese estado,
@@ -177,7 +222,8 @@ def update_draw_config(**patch) -> DrawConfig:
     if clean.get("tracking") is False:
         clean["smoothing"] = False
         clean["traces"] = False
-    if clean.get("smoothing") or clean.get("traces"):
+        clean["zone_total"] = False
+    if clean.get("smoothing") or clean.get("traces") or clean.get("zone_total"):
         clean["tracking"] = True
 
     with _lock:
@@ -196,6 +242,17 @@ def reset_draw_config() -> DrawConfig:
         _version_seq += 1
         _current = replace(DrawConfig(), version=_version_seq)
         return _current
+
+
+def anclaje_de_zona(nombre: str):
+    """
+    'centro' | 'inferior' -> el sv.Position que consume PolygonZone.
+
+    Un valor desconocido cae al centro en vez de romper: el endpoint ya valida contra
+    ZONE_ANCHORS, y en el hot path preferimos contar algo antes que perder el frame
+    (mismo criterio que un box_style desconocido).
+    """
+    return sv.Position.BOTTOM_CENTER if nombre == "inferior" else sv.Position.CENTER
 
 
 def hex_to_bgr(color_hex: str) -> Tuple[int, int, int]:

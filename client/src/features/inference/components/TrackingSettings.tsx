@@ -21,8 +21,8 @@ import { useStreamStore } from '../store/streamStore';
  * Aplica las dependencias entre los tres ajustes, igual que update_draw_config() en
  * el backend (render/draw_config.py):
  *
- *   - pedir suavizado o trazas PRENDE el seguimiento
- *   - apagar el seguimiento APAGA los dos
+ *   - pedir suavizado, trazas o el acumulado de zona PRENDE el seguimiento
+ *   - apagar el seguimiento APAGA los tres
  *
  * No es cosmetica. Sin `tracker_id` el suavizado de supervision no suaviza y avisa
  * (el toggle quedaria prendido sin hacer nada, que es exactamente lo que hay que
@@ -37,8 +37,11 @@ export function aplicarDependencias(patch: Partial<DrawSettings>): Partial<DrawS
   if (patch.tracking === false) {
     resultado.smoothing = false;
     resultado.traces = false;
+    // El acumulado de zona vive en el panel de Zonas, pero cuelga del mismo maestro:
+    // cuenta objetos DISTINTOS, y sin tracker_id no hay objetos distintos que contar.
+    resultado.zoneTotal = false;
   }
-  if (patch.smoothing || patch.traces) {
+  if (patch.smoothing || patch.traces || patch.zoneTotal) {
     resultado.tracking = true;
   }
   return resultado;
