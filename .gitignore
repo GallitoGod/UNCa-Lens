@@ -13,17 +13,10 @@ client/dist/
 skills-lock.json
 .pytest_cache
 
-# SavedModel TF1 original del clasificador (171 MB): es la FUENTE desde la que se
-# genero models/saved_model_class.onnx con tf2onnx, no lo usa el runtime (.pb ni
-# siquiera esta en MODEL_EXTENSIONS). Queda afuera por el limite de 100 MB por
-# archivo de GitHub y porque models/ NO esta en git-LFS (pendientes #11/#13).
-# El .onnx SI se versiona: se convirtio a float16 (171 -> 86 MB) y entra como blob
-# normal. La conversion mantiene la IO en float32, asi que el config no cambia.
 models/saved_model_class.pb
 
-# Material de prueba (videos/fotos del usuario). NO se versiona: un video de dron
-# en 4K son cientos de MB y el .git de este repo ya pesa 401 MB con models/ fuera
-# de LFS (pendientes #11/#13). La app abre el archivo por el selector del cliente,
-# asi que no necesita estar trackeado para funcionar.
+# Material de prueba (videos/fotos del usuario)
 media/
 exports/
+doc.html
+docs/

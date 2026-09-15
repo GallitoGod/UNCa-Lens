@@ -20,6 +20,13 @@
 // unica fuente honesta —depende del build de Chromium y de los codecs del sistema— y
 // asi un Electron mas viejo (o uno futuro que quite un codec) sigue grabando algo en
 // vez de fallar.
+//
+// EL NOMBRE DEL ARCHIVO SE RECIBE (2026-09-10). Antes era la constante `grabacion.<ext>`,
+// asi que la segunda grabacion caia en la carpeta de descargas como `grabacion (1).mp4` y
+// no habia forma de saber de que modelo ni de que momento era. Ahora `start()` acepta el
+// tronco, y quien lo elige es `useCaptura`: cuando en la misma captura se vuelcan las
+// detecciones, le pasa EL MISMO tronco que el .json del backend, y el par queda unido por
+// el nombre. Sin volcado cae a una marca de tiempo, que igual es mejor que una constante.
 
 import { useCallback, useRef, useState, type RefObject } from 'react';
 import fixWebmDuration from 'fix-webm-duration';
@@ -62,8 +69,20 @@ export interface RecorderControls {
   error: string | null;
   /** Extension del archivo que se va a producir ('mp4' | 'webm'), para mostrarla. */
   formato: string | null;
-  start: () => void;
+  /**
+   * Arranca. `nombre` es el tronco del archivo SIN extension; omitirlo cae a una marca
+   * de tiempo. Se usa para que el video y el volcado de detecciones de la misma captura
+   * salgan con el mismo nombre (ver useCaptura).
+   */
+  start: (nombre?: string) => void;
   stop: () => void;
+}
+
+/** Tronco por defecto: marca de tiempo local, para que dos grabaciones no colisionen. */
+function nombrePorDefecto(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `grabacion-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
 export function useRecorder(canvasRef: RefObject<HTMLCanvasElement | null>): RecorderControls {
@@ -75,6 +94,9 @@ export function useRecorder(canvasRef: RefObject<HTMLCanvasElement | null>): Rec
   // Formato con el que se esta grabando AHORA. Se fija al arrancar y no se relee: si
   // cambiara a mitad de una grabacion, los trozos no se podrian juntar en un blob.
   const formatoRef = useRef<Formato | null>(null);
+  // Tronco del nombre de ESTA grabacion. Se fija al arrancar por el mismo motivo que el
+  // formato: la descarga ocurre en `onstop`, y para entonces el argumento ya no esta.
+  const nombreRef = useRef<string>('');
 
   const formato = elegirFormato();
 
@@ -82,12 +104,12 @@ export function useRecorder(canvasRef: RefObject<HTMLCanvasElement | null>): Rec
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `grabacion.${ext}`;
+    a.download = `${nombreRef.current || nombrePorDefecto()}.${ext}`;
     a.click();
     URL.revokeObjectURL(url);
   }, []);
 
-  const start = useCallback(() => {
+  const start = useCallback((nombre?: string) => {
     setError(null);
     const canvas = canvasRef.current as CanvasWithCapture | null;
     if (!canvas) {
@@ -110,6 +132,7 @@ export function useRecorder(canvasRef: RefObject<HTMLCanvasElement | null>): Rec
     }
 
     formatoRef.current = elegido;
+    nombreRef.current = nombre || nombrePorDefecto();
     chunks.current = [];
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) chunks.current.push(e.data);
