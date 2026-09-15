@@ -33,7 +33,9 @@ https://github.com/user-attachments/assets/d95da196-59f0-4d70-acf8-88f3eaf8263f
 
 | Área | Estado |
 |---|---|
-| Detección de objetos |  Funcional (YOLOv7-tiny ONNX, EfficientDet-lite0 TFLite) |
+| Detección de objetos |  Funcional (YOLOv7-tiny ONNX, EfficientDet-lite0 TFLite, `best` YOLOv8 VisDrone ONNX, `cattle_view` YOLOv8 en ONNX y TorchScript) |
+| Seguimiento y zonas |  Funcional (ByteTrack + suavizado + trazas, zonas poligonales con conteo acumulado) |
+| Captura |  Video MP4 + volcado de detecciones JSON, en un solo gesto |
 | Clasificación |  Funcional (InceptionV4 ONNX, 1103 clases multi-etiqueta) |
 | Segmentación |  No implementada — la API responde `501` honesto |
 | Frontend React + Electron |  Operativo, verificado en dev y en build `file://` |
@@ -41,7 +43,7 @@ https://github.com/user-attachments/assets/d95da196-59f0-4d70-acf8-88f3eaf8263f
 | Cámara en vivo |  Implementada, no verificada contra hardware real |
 | Empaquetado / instalador |  Pendiente (hoy corre desde el repo con su venv) |
 
-82 tests verdes (unitarios + end-to-end real contra los tres modelos).
+348 tests verdes (unitarios + end-to-end real).
 
 ---
 
@@ -51,30 +53,61 @@ https://github.com/user-attachments/assets/d95da196-59f0-4d70-acf8-88f3eaf8263f
   ┌──────────────────────────┐            ┌──────────────────────────────────────┐
   │ Cliente (React/Electron) │   frame    │   Backend (FastAPI, Python 3.12)     │
   │                          │   JPEG     │                                      │
-  │ webcam / video / imagen  ├──binario──►│  preprocess → adapter → predict       │
-  │                          │            │      → unpack → postprocess           │
-  │ canvas: frame + cajas    │◄───JSON────┤                                      │
-  └──────────────────────────┘  envelope  └──────────────────────────────────────┘
+  │ webcam / video / imagen  ├──binario──►│  preprocess → adapter → predict      │
+  │                          │            │      → unpack → postprocess          │
+  │                          │            │      → tracking / zonas → render     │
+  │ canvas: pinta lo que     │◄──binario──┤  (JPEG ya compuesto: detección)      │
+  │ vuelve                   │◄───JSON────┤  (clasificación y errores)           │
+  └──────────────────────────┘            └──────────────────────────────────────┘
 ```
 
-El cliente es un thin client: captura frames, los manda por WebSocket y dibuja el
-resultado. No toca el disco — todo (listar modelos, leer/escribir configs, subir pesos)
-va por HTTP al backend.
+El cliente es un thin client: captura frames, los manda por WebSocket y pinta lo que
+vuelve. **No dibuja ni una caja**: el dibujo lo hace el backend con los annotators de
+[`supervision`](https://github.com/roboflow/supervision). Tampoco toca el disco — todo
+(listar modelos, leer/escribir configs, subir pesos, bajar volcados) va por HTTP.
 
-El backend devuelve un envelope etiquetado por cada frame recibido, siempre, incluso
-ante error (romper ese "siempre responde" reintroduce un deadlock del stream):
+El backend responde **un mensaje por cada frame recibido, siempre**, incluso ante error
+(romper ese "siempre responde" reintroduce un deadlock del stream). Ese mensaje tiene una
+de dos formas, y el cliente las distingue por el tipo del dato (binario o texto), no por
+un campo:
+
+- **Binario — el frame JPEG ya compuesto.** Es la respuesta de los modelos de
+  **detección** (y de segmentación cuando exista). El backend dibuja sobre una copia del
+  frame, en capas: zonas → sombreado → trazas → cajas → etiquetas (con el nombre de la
+  clase y el `#id` del seguimiento), y lo re-encodea. Colores, estilo de marca, modo de
+  etiqueta, tracking, suavizado y trazas son ajustes del usuario que viajan por
+  `POST /config/draw` y se aplican desde el frame siguiente.
+- **Texto — envelope JSON `{task, result, error}`.** Lo usan la **clasificación**, cuyo
+  resultado es texto y no geometría (componerlo obligaría a re-encodear un frame entero
+  para estampar tres renglones), y **todos los errores**, de cualquier tarea:
 
 ```jsonc
-// detección
-{ "task": "detection",      "result": [[x1, y1, x2, y2, conf, cls], ...], "error": null }
 // clasificación
 { "task": "classification", "result": [{ "cls": 663, "score": 0.61 }, ...], "error": null }
 // error
 { "task": null, "result": null, "error": "no_model" }   // frame_invalido | inference_error
 ```
 
-El formato interno estándar de una detección es `[x1, y1, x2, y2, conf, cls]` en píxeles
-de la imagen original (letterbox ya deshecho).
+Además de frames, por el mismo WebSocket viajan **mensajes de control** (JSON con clave
+`type`), porque pertenecen a *esa* conexión y un `POST` no sabría a qué stream le habla.
+Cada uno se contesta con un ack que trae el estado efectivo:
+
+| Control | Para qué | Ack |
+|---|---|---|
+| `geometry` | Declara las zonas poligonales (coordenadas normalizadas `[0,1]`, lista completa) | `geometry_ack` |
+| `zone_reset` | Pone en cero el acumulado de una zona o de todas | `zone_reset_ack` |
+| `export_start` / `export_stop` | Abre / cierra el volcado de detecciones a `exports/*.json` | `export_ack` |
+
+El estado entre frames (tracker, suavizado, trazas, zonas, volcado abierto) vive en la
+conexión: cambiar de fuente o reconectar lo reinicia solo. La URL `?stateful=false` la usa
+el envío de imágenes sueltas, que no tienen memoria temporal pero sí aceptan zonas.
+
+Adentro del pipeline, una detección es `[x1, y1, x2, y2, conf, cls]` en píxeles de la
+imagen original (letterbox ya deshecho), y al salir del postproceso se convierte a
+`sv.Detections`, que es el tipo que usan el tracking y el render. Ese número ya no sale
+por el WebSocket; para recuperarlo está el **volcado de detecciones**: una fila por
+detección por frame, con `tracker_id` para reconstruir recorridos, que se baja por
+`GET /exports/{name}`.
 
 ### El pipeline, paso a paso
 
@@ -84,9 +117,12 @@ de la imagen original (letterbox ya deshecho).
 4. **unpack** — tensor crudo → matriz `(N,6)` (detección) o vector `(C,)` (clasificación)
 5. **output adapter** — reordena columnas al formato estándar (solo si el `pack_format` lo necesita)
 6. **postprocess** — filtro de confianza → top-k → NMS → deshacer letterbox → orden por score
+7. **sesión** — tracking (ByteTrack), suavizado, conteo en zonas y volcado *(solo detección)*
+8. **render** — annotators de supervision sobre el frame + encode JPEG *(solo detección)*
 
 El estado por frame viaja en el dict `meta`, no en el controller: cada inferencia es
-autocontenida y varios frames pueden correr en paralelo.
+autocontenida. La memoria *entre* frames (paso 7) no vive en el pipeline sino en la
+conexión del WebSocket.
 
 ---
 
@@ -151,7 +187,7 @@ Variables de escape: `UNCA_NO_SPAWN=1` (no spawnear backend) y `UNCA_PYTHON=<rut
 ### Tests
 
 ```bash
-pytest                                                          # 82 tests
+pytest                                                          # 348 tests
 pytest --ignore=src/api/func/tests/test_end_to_end_yolov7.py    # solo unitarios
 
 npm run typecheck    # frontend: no hay runner de tests, se valida con tsc + build
@@ -202,7 +238,8 @@ Hay plantillas de ejemplo en `configs/plantillas/` (no se listan como modelos ca
 ### Formatos soportados
 
 Runtimes (`runtime.backend`): `onnxruntime` (`.onnx`), `tflite` (`.tflite`),
-`keras` (`.h5`, `.keras`), `pytorch` (`.pt`, `.pth`).
+`keras` (`.h5`, `.keras`), `pytorch` (`.torchscript`, `.pt`, `.pth` — tiene que ser
+TorchScript: un checkpoint de Ultralytics guardado con pickle no carga, hay que exportarlo).
 
 Desempaquetadores (`output.pack_format`) — el mapeo tensor crudo → formato interno:
 
@@ -210,6 +247,7 @@ Desempaquetadores (`output.pack_format`) — el mapeo tensor crudo → formato i
 |---|---|---|
 | `raw` | detección | Tensor plano `(N,K)` con columnas declaradas en `tensor_structure` |
 | `yolo_flat` | detección | Salida YOLO aplanada, con objectness × class scores |
+| `yolo_v8` | detección | Head `Detect` de Ultralytics v8+: `(1, 4+C, N)` transpuesto y sin objectness |
 | `boxes_scores` | detección | Tensores separados de cajas y puntajes (ya en formato estándar) |
 | `tflite_detpost` | detección | Op `DetectionPostProcess` de TFLite (trae NMS y umbral aplicados) |
 | `anchor_deltas` | detección | Cabeza cruda anchor-based (EfficientDet / SSD); requiere `anchor_config` |
@@ -234,7 +272,9 @@ Desempaquetadores (`output.pack_format`) — el mapeo tensor crudo → formato i
 | `GET` | `/config/template/{model_type}` | Defaults del schema por tipo (single source of truth del wizard) |
 | `GET` / `POST` | `/configs/{name}` | Lee / valida y escribe `configs/<name>.json` |
 | `POST` | `/models/upload` | Sube un peso por multipart (valida extensión y nombre antes del stream) |
-| `WS` | `/video_stream` | JPEG binario in → envelope JSON out (1 frame en vuelo) |
+| `POST` | `/config/draw` | Ajustes de dibujo y seguimiento en vivo (colores, estilo, etiquetas, tracking, zonas…). Devuelve el estado efectivo |
+| `WS` | `/video_stream` | JPEG binario in → JPEG compuesto (detección) o envelope JSON (clasificación / errores) out, 1 frame en vuelo. Acepta mensajes de control |
+| `GET` | `/exports/{name}` | Descarga un volcado de detecciones |
 | `GET` | `/logs/inference` | Últimos 50 errores de inferencia |
 | `GET` | `/metrics` | avg / p95 / fps + desglose pre / inferencia / post |
 
@@ -270,9 +310,10 @@ docs/                        Documentación de arquitectura, specs y planes
 ```
 
 El punto de extensión es `tasks/`: agregar un tipo de modelo es agregar una
-`TaskStrategy` (`build_pipeline` + `serialize`) y su servicio de render en el cliente. La
-clasificación se implementó así, sin tocar el controller, el WebSocket ni el transporte
-del cliente.
+`TaskStrategy` (`build_pipeline` + `serialize`) que declara su `output_kind`: `"frame"` si
+el backend compone la imagen (con su `render`) o `"json"` si devuelve un envelope. El
+WebSocket despacha por eso, no por el tipo de tarea. La clasificación se implementó así,
+sin tocar el controller, el WebSocket ni el transporte del cliente.
 
 **Stack**: Python 3.12.10 · FastAPI · ONNX Runtime 1.26 (CUDA 12) · TensorFlow 2.21 ·
 PyTorch 2.13 · OpenCV 5 · NumPy 2.5 — React 19 · Vite 6 · TypeScript · Zustand ·
@@ -284,8 +325,6 @@ TanStack Query · Tailwind 4 · Electron 32.
 
 - **Segmentación no implementada** — falta el unpacker de máscaras, el decode/upsample y el
   serializador. La API responde `501`, no falla en silencio.
-- **Sin nombres de clase**: las etiquetas muestran el id numérico. Falta decidir cómo viaja
-  el `label_map`.
 - **Sin instalador**: la app corre desde el repo, usando su `.venv`. Empaquetarla (Python
   embebido + electron-builder) es un proyecto aparte.
 - **Los pesos se versionan como blobs normales**, no en git-LFS. La migración a LFS está
@@ -295,10 +334,18 @@ TanStack Query · Tailwind 4 · Electron 32.
 
 ## Rumbo
 
-Se acaba de completar el hito de mudar el backend a
-[`supervision`](https://github.com/roboflow/supervision): el cliente deja de dibujar cajas y
-máscaras y queda como thin client puro, mientras el backend gana annotators, tracking
-(ByteTrack) y zonas. De aqui en adelante se va a empezar a utilizar las capacidades de supervision.
+El render ya vive en el backend con `supervision`, y sobre eso ya están funcionando el
+seguimiento (ByteTrack, suavizado y trazas), las zonas poligonales con conteo acumulado y
+la captura unificada de video + volcado de detecciones. Lo que sigue, en orden:
+
+1. **Benchmarking de modelos.** Evaluar cada modelo contra un conjunto de testing
+   etiquetado y obtener sus métricas: precision, recall, F1, mAP y sus curvas y cuadros a
+   distintos umbrales, para poder comparar modelos con números y no solo a ojo.
+2. **Segmentación.** Implementar el pipeline que hoy responde `501`: unpacker de máscaras,
+   decode/upsample al tamaño original y render de la máscara sobre el frame en el backend.
+3. **Refactorización final.** Con esas dos partes terminadas, refactorizar el sistema
+   completo midiéndolo de principio a fin, buscando las piezas con sobreingeniería donde no
+   hacía falta, para dejar un código simple y eficaz y dar el sistema por terminado.
 
 
 ## Contribuir
