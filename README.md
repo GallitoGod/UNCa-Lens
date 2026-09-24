@@ -198,7 +198,7 @@ npm run build
 
 ## Configurar un modelo
 
-Un modelo = un archivo de pesos en `models/` + un JSON en `configs/` con el mismo
+Un modelo = su archivo autocontenido en `models/` + un JSON en `configs/` con el mismo
 nombre base. El JSON se valida contra un schema estricto de Pydantic
 (`extra="forbid"`): un campo desconocido o mal escrito es un error de carga visible, no un
 silencio. La app trae un wizard de 4 pasos que lo genera y lo guarda por HTTP.
